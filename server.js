@@ -5,114 +5,66 @@ import fetch from 'node-fetch';
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// variáveis de ambiente do Render
-const {
-  ML_ACCESS_TOKEN,       // access_token inicial (APP_USR-...)
-  ML_REFRESH_TOKEN,      // refresh token (TG-...)
-  ML_CLIENT_ID,          // 6265601993393948
-  ML_CLIENT_SECRET       // sua chave secreta
-} = process.env;
-
-// vamos manter o token em memória e atualizar quando renovar
-let accessToken = ML_ACCESS_TOKEN;
-
 app.use(cors());
 
-/**
- * Renova o access_token usando o refresh_token
- */
-async function refreshAccessToken() {
-  const url = 'https://api.mercadolibre.com/oauth/token';
-  const body = new URLSearchParams({
-    grant_type: 'refresh_token',
-    client_id: ML_CLIENT_ID,
-    client_secret: ML_CLIENT_SECRET,
-    refresh_token: ML_REFRESH_TOKEN
-  });
-
-  const resp = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body
-  });
-
-  if (!resp.ok) {
-    const err = await resp.text();
-    throw new Error(`Falha ao renovar token: ${resp.status} - ${err}`);
-  }
-
-  const data = await resp.json();
-  accessToken = data.access_token;            // atualiza o token em memória
-  return accessToken;
-}
+// Home: só pra ver que está vivo
+app.get('/', (_req, res) => {
+  res.send('Servidor proxy do Mercado Livre funcionando!');
+});
 
 /**
- * Faz busca no ML, tentando renovar o token se necessário (401)
- */
-async function mlSearch(params) {
-  const base = 'https://api.mercadolibre.com/sites/MLB/search';
-  const url = `${base}?${params.toString()}`;
-
-  // 1ª tentativa com token atual
-  let resp = await fetch(url, {
-    headers: { Authorization: `Bearer ${accessToken}` }
-  });
-
-  // se o token estiver inválido/expirado, renova e tenta outra vez
-  if (resp.status === 401) {
-    await refreshAccessToken();
-    resp = await fetch(url, {
-      headers: { Authorization: `Bearer ${accessToken}` }
-    });
-  }
-
-  return resp;
-}
-
-/**
- * Endpoint de busca:
- * /api/search?q=celular&category=MLB1000&limit=10&sort=sold_quantity_desc
+ * Rota de busca:
+ * Ex.: /api/search?q=celular&limit=5
+ *      /api/search?category=MLB1000&sort=sold_quantity_desc&limit=10
  */
 app.get('/api/search', async (req, res) => {
   try {
     const { q, category, limit = '20', sort = 'sold_quantity_desc' } = req.query;
 
     const params = new URLSearchParams();
-    if (q)        params.set('q', q);
-    if (category) params.set('category', category);
+    if (q) params.set('q', q);
+    if (category) params.set('category', String(category));
     params.set('limit', String(limit));
     params.set('sort', String(sort));
 
-    const resp = await mlSearch(params);
+    const url = `https://api.mercadolibre.com/sites/MLB/search?${params.toString()}`;
 
-    if (!resp.ok) {
-      const errorText = await resp.text();
-      return res.status(resp.status).json({
+    // *** AQUI ESTÁ O AJUSTE: envia o access token no header ***
+    const response = await fetch(url, {
+      headers: { Authorization: `Bearer ${process.env.ML_ACCESS_TOKEN}` }
+    });
+
+    if (!response.ok) {
+      const details = await response.text();
+      return res.status(response.status).json({
         error: 'Erro ao buscar produtos',
-        status: resp.status,
-        details: errorText
+        status: response.status,
+        details
       });
     }
 
-    const data = await resp.json();
+    const data = await response.json();
     res.json(data);
   } catch (err) {
     console.error('Erro /api/search:', err);
-    res.status(500).json({ error: 'Falha interna' });
+    res.status(500).json({ error: 'Falha ao buscar produtos' });
   }
 });
 
 /**
- * Callback OAuth: recebe ?code=... e troca por tokens (mostra na tela)
- * Use apenas para obter tokens inicialmente.
+ * Callback OAuth:
+ * Recebe ?code=... e mostra o access_token e refresh_token
+ * (copie-os para as variáveis ML_ACCESS_TOKEN e ML_REFRESH_TOKEN no Render)
  */
 app.get('/callback', async (req, res) => {
   try {
-    const code = req.query.code;
+    const { code } = req.query;
+    if (!code) return res.status(400).send('code não informado');
+
     const body = new URLSearchParams({
       grant_type: 'authorization_code',
-      client_id: ML_CLIENT_ID,
-      client_secret: ML_CLIENT_SECRET,
+      client_id: process.env.ML_CLIENT_ID,
+      client_secret: process.env.ML_CLIENT_SECRET,
       code,
       redirect_uri: 'https://mercadolivre-proxy.onrender.com/callback'
     });
@@ -124,30 +76,22 @@ app.get('/callback', async (req, res) => {
     });
 
     const tokens = await tokenResp.json();
-    if (tokens.access_token) accessToken = tokens.access_token;
 
-    res
-      .status(200)
-      .send(
-        `<pre>Tokens recebidos
+    res.type('text/plain').send(
+`Tokens recebidos
 
 access_token (salve em ML_ACCESS_TOKEN no Render):
-${tokens.access_token || ''}
+${tokens.access_token || '(sem access_token)'}
 
 refresh_token (salve em ML_REFRESH_TOKEN):
-${tokens.refresh_token || ''}
+${tokens.refresh_token || '(sem refresh_token)'}
 
-Depois de salvar, teste: /api/search?q=celular&limit=5
-</pre>`
-      );
+Depois de salvar, teste: /api/search?q=celular&limit=5`
+    );
   } catch (e) {
-    res.status(500).send(`Erro no /callback: ${e.message}`);
+    console.error('Erro /callback:', e);
+    res.status(500).send('Erro ao processar callback');
   }
-});
-
-// raiz
-app.get('/', (_, res) => {
-  res.send('Servidor proxy do Mercado Livre funcionando!');
 });
 
 app.listen(PORT, () => {
