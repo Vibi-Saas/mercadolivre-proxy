@@ -153,3 +153,4 @@ app.get('/', (_, res) => {
 app.listen(PORT, () => {
   console.log(`Servidor rodando na porta ${PORT}`);
 });
+feat: add Authorization header to /api/search
